@@ -21,8 +21,8 @@ type LambdaFunction struct {
 }
 
 var LambdaFunctionUsageSchema = []*schema.UsageSchemaItem{
-	{Key: "request_duration_ms", DefaultValue: 0, ValueType: schema.Float64},
-	{Key: "monthly_requests", DefaultValue: 0, ValueType: schema.Float64},
+	{Key: "request_duration_ms", DefaultValue: float64(0), ValueType: schema.Float64},
+	{Key: "monthly_requests", DefaultValue: float64(0), ValueType: schema.Float64},
 }
 
 func (a *LambdaFunction) PopulateUsage(u *schema.UsageData) {
