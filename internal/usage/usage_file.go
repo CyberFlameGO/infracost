@@ -10,9 +10,9 @@ import (
 
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 	"golang.org/x/mod/semver"
 	"gopkg.in/yaml.v2"
+	yamlv3 "gopkg.in/yaml.v3"
 
 	"github.com/infracost/infracost"
 	"github.com/infracost/infracost/internal/schema"
@@ -22,14 +22,8 @@ const minUsageFileVersion = "0.1"
 const maxUsageFileVersion = "0.1"
 
 type UsageFile struct { // nolint:revive
-	Version       string                 `yaml:"version"`
-	ResourceUsage map[string]interface{} `yaml:"resource_usage"`
-}
-
-type SchemaItem struct {
-	Key          string
-	ValueType    schema.UsageVariableType
-	DefaultValue interface{}
+	Version       string      `yaml:"version"`
+	ResourceUsage yamlv3.Node `yaml:"resource_usage"`
 }
 
 type SyncResult struct {
@@ -71,7 +65,7 @@ func SyncUsageData(projects []*schema.Project, existingUsageData map[string]*sch
 	return &syncResult, nil
 }
 
-func syncResourcesUsage(resources []*schema.Resource, usageSchema map[string][]*SchemaItem, existingUsageData map[string]*schema.UsageData) (SyncResult, yaml.MapSlice) {
+func syncResourcesUsage(resources []*schema.Resource, usageSchema map[string][]*schema.UsageSchemaItem, existingUsageData map[string]*schema.UsageData) (SyncResult, yaml.MapSlice) {
 	syncResult := SyncResult{EstimationErrors: make(map[string]error)}
 	syncedResourceUsage := make(map[string]interface{})
 	for _, resource := range resources {
@@ -119,7 +113,7 @@ func syncResourcesUsage(resources []*schema.Resource, usageSchema map[string][]*
 	return syncResult, result
 }
 
-func schemaItemsToUsageSchemaItems(schemaItems []*SchemaItem) []*schema.UsageSchemaItem {
+func schemaItemsToUsageSchemaItems(schemaItems []*schema.UsageSchemaItem) []*schema.UsageSchemaItem {
 	resourceUSchema := make([]*schema.UsageSchemaItem, 0, len(schemaItems))
 
 	for _, s := range schemaItems {
@@ -163,7 +157,7 @@ func buildResourceUsage(schemaItems []*schema.UsageSchemaItem, existingUsageData
 				if v := existingUsageData.Get(usageKey).Map(); v != nil {
 					subData := schema.NewUsageData(usageKey, v)
 					existingUsageValue = buildResourceUsage(
-						schemaItemsToUsageSchemaItems(usageSchemaItem.DefaultValue.([]*SchemaItem)),
+						usageSchemaItem.DefaultValue.([]*schema.UsageSchemaItem),
 						subData,
 					)
 				}
@@ -173,7 +167,7 @@ func buildResourceUsage(schemaItems []*schema.UsageSchemaItem, existingUsageData
 		usage[usageKey] = usageSchemaItem.DefaultValue
 
 		if usageValueType == schema.Items {
-			usage[usageKey] = itemsToMap(usageSchemaItem.DefaultValue.([]*SchemaItem))
+			usage[usageKey] = itemsToMap(usageSchemaItem.DefaultValue.([]*schema.UsageSchemaItem))
 		}
 
 		if existingUsageValue != nil {
@@ -184,11 +178,11 @@ func buildResourceUsage(schemaItems []*schema.UsageSchemaItem, existingUsageData
 	return usage
 }
 
-func itemsToMap(items []*SchemaItem) map[string]interface{} {
+func itemsToMap(items []*schema.UsageSchemaItem) map[string]interface{} {
 	m := make(map[string]interface{}, len(items))
 	for _, item := range items {
 		if item.ValueType == schema.Items {
-			m[item.Key] = itemsToMap(item.DefaultValue.([]*SchemaItem))
+			m[item.Key] = itemsToMap(item.DefaultValue.([]*schema.UsageSchemaItem))
 			continue
 		}
 
@@ -198,39 +192,73 @@ func itemsToMap(items []*SchemaItem) map[string]interface{} {
 	return m
 }
 
-func loadUsageSchema() (map[string][]*SchemaItem, error) {
-	usageSchema := make(map[string][]*SchemaItem)
-	usageData, err := loadReferenceFile()
+func loadUsageSchema() (map[string][]*schema.UsageSchemaItem, error) {
+	usageSchema := make(map[string][]*schema.UsageSchemaItem)
+
+	usageFile, err := loadReferenceFile()
 	if err != nil {
 		return usageSchema, err
 	}
 
-	for _, resUsageData := range usageData {
-		resourceTypeName := strings.Split(resUsageData.Address, ".")[0]
-		usageSchema[resourceTypeName] = make([]*SchemaItem, 0)
+	if len(usageFile.ResourceUsage.Content)%2 != 0 {
+		log.Errorf("YAML resource usage contents are not divisible by 2")
+		return usageSchema, errors.New("Error loading reference usage file: unexpected YAML format")
+	}
 
-		for usageKeyName, usageRawResult := range resUsageData.Attributes {
-			usageSchema[resourceTypeName] = append(
-				usageSchema[resourceTypeName],
-				toSchemaItem(usageRawResult, usageKeyName),
-			)
+	for i := 0; i < len(usageFile.ResourceUsage.Content); i += 2 {
+		resourceKeyNode := usageFile.ResourceUsage.Content[i]
+		resourceValNode := usageFile.ResourceUsage.Content[i+1]
+
+		if len(resourceValNode.Content)%2 != 0 {
+			log.Errorf("YAML resource value contents are not divisible by 2")
+			return usageSchema, errors.New("Error loading reference usage file: unexpected YAML format")
+		}
+
+		resourceType := strings.Split(resourceKeyNode.Value, ".")[0]
+		usageSchema[resourceType] = make([]*schema.UsageSchemaItem, 0, len(resourceValNode.Content)/2)
+
+		for i := 0; i < len(resourceValNode.Content); i += 2 {
+			attrKeyNode := resourceValNode.Content[i]
+			attrValNode := resourceValNode.Content[i+1]
+
+			schemaItem, err := toSchemaItem(attrKeyNode, attrValNode)
+			if err != nil {
+				return usageSchema, errors.Wrap(err, "Error loading reference usage file")
+			}
+
+			usageSchema[resourceType] = append(usageSchema[resourceType], schemaItem)
 		}
 	}
 
 	return usageSchema, nil
 }
 
-// toSchema item turns gjson.Result into a *SchemaItem. This function supports recursion
-// to allow for complex gjson types "gjson.JSON" to be parsed into nested sets of SchemaItem
+// toSchema item turns a YAML key node and a YAML value node into a *SchemaItem. This function supports recursion
+// to allow for YAML map nodes to be parsed into nested sets of SchemaItem
 //
 // e.g. given:
 //
-// 		usageRawResult: gjson.Result{
-//    		Type: gjson.JSON,
-//    		Raw: `{"prop1": "test", "prop2":"test2", "prop3": {"nested1": "test3"}}`
-// 		}
+//		keyNode: &yaml.Node{
+//			Value: "testKey",
+//		}
 //
-// 		usageKeyName: "testKey"
+//		valNode: &yaml.Node{
+//			Kind: yaml.MappingNode,
+//			Content: []*yaml.Node{
+//				&yaml.Node{Value: "prop1"},
+//				&yaml.Node{Value: "test"},
+//				&yaml.Node{Value: "prop2"},
+//				&yaml.Node{Value: "test2"},
+//				&yaml.Node{Value: "prop3"},
+//				&yaml.Node{
+//					Kind: yaml.MappingNode,
+//					Content: []*yaml.Node{
+//						&yaml.Node{Value: "nested1"},
+//						&yaml.Node{Value: "test3"},
+//					},
+//				},
+//			},
+//		}
 //
 // toSchemaItem will return:
 //
@@ -257,34 +285,58 @@ func loadUsageSchema() (map[string][]*SchemaItem, error) {
 //				},
 //			}
 //
-func toSchemaItem(usageRawResult gjson.Result, usageKeyName string) *SchemaItem {
+func toSchemaItem(keyNode *yamlv3.Node, valNode *yamlv3.Node) (*schema.UsageSchemaItem, error) {
+	if keyNode == nil || valNode == nil {
+		log.Errorf("YAML contains nil key or value node")
+		return nil, errors.New("unexpected YAML format")
+	}
+
 	var defaultValue interface{}
-	usageValueType := schema.Int64
-	defaultValue = 0
+	var usageValueType schema.UsageVariableType
 
-	if usageRawResult.Type == gjson.JSON {
+	switch valNode.ShortTag() {
+	case "!!int":
+		usageValueType = schema.Int64
+		defaultValue = 0
+
+	case "!!float":
+		usageValueType = schema.Float64
+		defaultValue = 0.0
+
+	case "!!map":
 		usageValueType = schema.Items
-		props := usageRawResult.Map()
-		items := make([]*SchemaItem, 0, len(props))
 
-		for key, result := range props {
-			items = append(items, toSchemaItem(result, key))
+		if len(valNode.Content)%2 != 0 {
+			log.Errorf("YAML map node contents are not divisible by 2")
+			return nil, errors.New("unexpected YAML format")
+		}
+
+		items := make([]*schema.UsageSchemaItem, 0, len(valNode.Content)/2)
+
+		for i := 0; i < len(valNode.Content); i += 2 {
+			mapKeyNode := valNode.Content[i]
+			mapValNode := valNode.Content[i+1]
+
+			mapSchemaItem, err := toSchemaItem(mapKeyNode, mapValNode)
+			if err != nil {
+				return nil, err
+			}
+
+			items = append(items, mapSchemaItem)
 		}
 
 		defaultValue = items
-	}
 
-	usageRawValue := usageRawResult.Value()
-	if _, ok := usageRawValue.(string); ok {
+	default:
 		usageValueType = schema.String
-		defaultValue = usageRawResult.String()
+		defaultValue = valNode.Value
 	}
 
-	return &SchemaItem{
-		Key:          usageKeyName,
+	return &schema.UsageSchemaItem{
+		Key:          keyNode.Value,
 		ValueType:    usageValueType,
 		DefaultValue: defaultValue,
-	}
+	}, nil
 }
 
 func mapToSortedMapSlice(input map[string]interface{}) yaml.MapSlice {
@@ -307,13 +359,13 @@ func mapToSortedMapSlice(input map[string]interface{}) yaml.MapSlice {
 	return result
 }
 
-func loadReferenceFile() (map[string]*schema.UsageData, error) {
-	referenceUsageFileContents := infracost.GetReferenceUsageFileContents()
-	usageData, err := parseYaml(*referenceUsageFileContents)
-	if err != nil {
-		return usageData, errors.Wrapf(err, "Error parsing usage file")
+func loadReferenceFile() (UsageFile, error) {
+	contents := infracost.GetReferenceUsageFileContents()
+	if contents == nil {
+		return UsageFile{}, errors.New("Could not find reference usage file")
 	}
-	return usageData, nil
+
+	return parseYAML(*contents)
 }
 
 func LoadFromFile(usageFilePath string, createIfNotExisting bool) (map[string]*schema.UsageData, error) {
@@ -348,29 +400,35 @@ func LoadFromFile(usageFilePath string, createIfNotExisting bool) (map[string]*s
 		return usageData, errors.Wrapf(err, "Error reading usage file")
 	}
 
-	usageData, err = parseYaml(out)
+	y, err := parseYAML(out)
 	if err != nil {
 		return usageData, errors.Wrapf(err, "Error parsing usage file")
 	}
 
+	var m map[string]interface{}
+	err = y.ResourceUsage.Decode(&m)
+	if err != nil {
+		return usageData, errors.Wrap(err, "Error parsing usage YAML")
+	}
+
+	usageData = schema.NewUsageMap(m)
+
 	return usageData, nil
 }
 
-func parseYaml(y []byte) (map[string]*schema.UsageData, error) {
+func parseYAML(y []byte) (UsageFile, error) {
 	var usageFile UsageFile
 
-	err := yaml.Unmarshal(y, &usageFile)
+	err := yamlv3.Unmarshal(y, &usageFile)
 	if err != nil {
-		return map[string]*schema.UsageData{}, errors.Wrap(err, "Error parsing usage YAML")
+		return usageFile, errors.Wrap(err, "Error parsing usage YAML")
 	}
 
 	if !checkVersion(usageFile.Version) {
-		return map[string]*schema.UsageData{}, fmt.Errorf("Invalid usage file version. Supported versions are %s ≤ x ≤ %s", minUsageFileVersion, maxUsageFileVersion)
+		return usageFile, fmt.Errorf("Invalid usage file version. Supported versions are %s ≤ x ≤ %s", minUsageFileVersion, maxUsageFileVersion)
 	}
 
-	usageMap := schema.NewUsageMap(usageFile.ResourceUsage)
-
-	return usageMap, nil
+	return usageFile, nil
 }
 
 func checkVersion(v string) bool {
