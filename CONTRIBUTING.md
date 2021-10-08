@@ -386,9 +386,9 @@ To do this Infracost supports passing usage data in through a usage YAML file. W
     request_duration_ms: 500      # Average duration of each request in milliseconds.
   ```
 
-The resource cost calcuation file (`internal/resources/*`) should describe the usage as `UsageSchemaItems` and container a helper to populate the resource arguments from usage data:
+The resource cost calcuation file (`internal/resources/*`) should describe the usage as `UsageItems` and container a helper to populate the resource arguments from usage data:
 ```go
-var LambdaFunctionUsageSchema = []*schema.UsageSchemaItem{
+var LambdaFunctionUsageSchema = []*schema.UsageItem{
 	{Key: "request_duration_ms", DefaultValue: 0.0, ValueType: schema.Float64},
 	{Key: "monthly_requests", DefaultValue: 0.0, ValueType: schema.Float64},
 }
