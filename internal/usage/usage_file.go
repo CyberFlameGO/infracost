@@ -33,25 +33,19 @@ type SyncResult struct {
 
 type ResourceUsage struct {
 	Key   string
-	Items map[string]*ResourceUsageItem
+	Items []*schema.UsageSchemaItem
 }
 
 func (r *ResourceUsage) Map() map[string]interface{} {
 	m := make(map[string]interface{}, len(r.Items))
-	for k, item := range r.Items {
-		m[k] = item.Value
+	for _, item := range r.Items {
+		m[item.Key] = item.Value
 	}
 
 	return m
 }
 
-type ResourceUsageItem struct {
-	*schema.UsageSchemaItem
-	DefaultValue interface{}
-	Value        interface{}
-}
-
-func SyncUsageData(projects []*schema.Project, existingUsageData map[string]*schema.UsageData, usageFilePath string) (*SyncResult, error) {
+func SyncUsageData(projects []*schema.Project, existingUsageData map[string][]*schema.UsageSchemaItem, usageFilePath string) (*SyncResult, error) {
 	if usageFilePath == "" {
 		return nil, nil
 	}
@@ -86,7 +80,7 @@ func SyncUsageData(projects []*schema.Project, existingUsageData map[string]*sch
 	return &syncResult, nil
 }
 
-func syncResourcesUsage(resources []*schema.Resource, referenceUsageSchema map[string][]*schema.UsageSchemaItem, existingUsageData map[string]*schema.UsageData) (SyncResult, *yamlv3.Node) {
+func syncResourcesUsage(resources []*schema.Resource, referenceUsageSchema map[string][]*schema.UsageSchemaItem, existingUsageData map[string][]*schema.UsageSchemaItem) (SyncResult, *yamlv3.Node) {
 	syncResult := SyncResult{EstimationErrors: make(map[string]error)}
 
 	resourcesUsages := make([]*ResourceUsage, 0, len(resources))
@@ -95,22 +89,18 @@ func syncResourcesUsage(resources []*schema.Resource, referenceUsageSchema map[s
 		resourceUsage := &ResourceUsage{
 			Key: resource.Name,
 		}
-
-		// Sync with the old reference usage file
+		
 		matchingReferenceUsageSchema, ok := findMatchingReferenceUsageSchema(referenceUsageSchema, resource)
 		if ok {
-			syncResourceUsageWithSchema(resourceUsage, matchingReferenceUsageSchema)
+			mergeUsageSchemaItems(resourceUsage.Items, matchingReferenceUsageSchema)
 		}
-
-		// Sync with the new UsageSchema resource attribute
-		if resource.UsageSchema != nil {
-			syncResourceUsageWithSchema(resourceUsage, resource.UsageSchema)
-		}
+		
+		mergeUsageSchemaItems(resourceUsage.Items, resource.UsageSchema)
 
 		// Sync the existing usage data from the usage file
 		existingResourceUsage := existingUsageData[resource.Name]
 		if existingResourceUsage == nil {
-			syncResourceUsageWithExisting(resourceUsage, existingResourceUsage)
+			mergeUsageSchemaItems(resourceUsage.Items, existingResourceUsage)
 		}
 
 		syncResult.ResourceCount++
@@ -150,29 +140,39 @@ func findMatchingReferenceUsageSchema(usageSchema map[string][]*schema.UsageSche
 	return matchingUsageFileSchema, ok
 }
 
-func syncResourceUsageWithSchema(resourceUsage *ResourceUsage, usageSchema []*schema.UsageSchemaItem) {
-	if resourceUsage.Items == nil {
-		resourceUsage.Items = make(map[string]*ResourceUsageItem)
+func mergeUsageSchemaItems(dest []*schema.UsageSchemaItem, src []*schema.UsageSchemaItem) {
+	destItemMap := make(map[string]*schema.UsageSchemaItem, len(dest))
+	for _, item := range dest {
+		destItemMap[item.Key] = item
 	}
-
-	for _, item := range usageSchema {
-		resourceUsageItem := &ResourceUsageItem{
-			UsageSchemaItem: item,
+	
+	for _, srcItem := range src {
+		destItem, ok := destItemMap[srcItem.Key]
+		if !ok {
+			destItem := &schema.UsageSchemaItem{Key: srcItem.Key}
+			dest = append(dest, destItem)
 		}
-
-		if item.ValueType == schema.Items {
-			subResourceUsageItem := &ResourceUsage{
-				Key: item.Key,
+		
+		destItem.ValueType = srcItem.ValueType
+		destItem.Description = srcItem.Description
+		
+		if srcItem.ValueType == schema.Items {
+			srcDefaultValue := srcItem.DefaultValue.([]*schema.UsageSchemaItem)
+			srcValue := srcItem.Value.([]*schema.UsageSchemaItem)
+			
+			if destItem.DefaultValue == nil {
+				destItem.DefaultValue = make([]*schema.UsageSchemaItem, 0)
 			}
-			val := item.DefaultValue.([]*schema.UsageSchemaItem)
-			syncResourceUsageWithSchema(subResourceUsageItem, val)
+			if destItem.Value == nil {
+				destItem.Value = make([]*schema.UsageSchemaItem, 0)
+			}
 
-			resourceUsageItem.DefaultValue = subResourceUsageItem
+			mergeUsageSchemaItems(destItem.DefaultValue.([]*schema.UsageSchemaItem), srcDefaultValue)			
+			mergeUsageSchemaItems(destItem.Value.([]*schema.UsageSchemaItem), srcValue)
 		} else {
-			resourceUsageItem.DefaultValue = item.DefaultValue
+			destItem.DefaultValue = srcItem.DefaultValue
+			destItem.Value = srcItem.Value
 		}
-
-		resourceUsage.Items[item.Key] = resourceUsageItem
 	}
 }
 
@@ -181,25 +181,25 @@ func syncResourceUsageWithExisting(resourceUsage *ResourceUsage, existing *schem
 		return
 	}
 
-	for key, item := range resourceUsage.Items {
+	for _, item := range resourceUsage.Items {
 		var val interface{}
 
 		switch item.ValueType {
 		case schema.Int64:
-			if v := existing.GetInt(key); v != nil {
+			if v := existing.GetInt(item.Key); v != nil {
 				val = *v
 			}
 		case schema.Float64:
-			if v := existing.GetFloat(key); v != nil {
+			if v := existing.GetFloat(item.Key); v != nil {
 				val = *v
 			}
 		case schema.StringArray:
-			if v := existing.GetStringArray(key); v != nil {
+			if v := existing.GetStringArray(item.Key); v != nil {
 				val = *v
 			}
 		case schema.Items:
 			subResourceUsage := &ResourceUsage{}
-			subExisting := schema.NewUsageData(key, existing.Get(key).Map())
+			subExisting := schema.NewUsageData(item.Key, existing.Get(item.Key).Map())
 			syncResourceUsageWithExisting(subResourceUsage, subExisting)
 		}
 
@@ -237,7 +237,11 @@ func resourceUsagesToYAMLNode(resourceUsages []*ResourceUsage) *yamlv3.Node {
 			}
 
 			if item.ValueType == schema.Items {
-				subResourceUsage := rawValue.(*ResourceUsage)
+				subResourceItems := rawValue.([]*schema.UsageSchemaItem)
+				subResourceUsage := &ResourceUsage{
+					Key:   item.Key,
+					Items: subResourceItems,
+				}
 				subResourceValNode := resourceUsagesToYAMLNode([]*ResourceUsage{subResourceUsage})
 				resourceValNode.Content = append(resourceValNode.Content, subResourceValNode.Content...)
 				continue
@@ -278,10 +282,11 @@ func resourceUsagesToYAMLNode(resourceUsages []*ResourceUsage) *yamlv3.Node {
 			}
 
 			itemValNode := &yamlv3.Node{
-				Kind:    kind,
-				Tag:     tag,
-				Value:   value,
-				Content: content,
+				Kind:        kind,
+				Tag:         tag,
+				Value:       value,
+				Content:     content,
+				LineComment: item.Description,
 			}
 
 			resourceValNode.Content = append(resourceValNode.Content, itemKeyNode)
@@ -296,12 +301,28 @@ func resourceUsagesToYAMLNode(resourceUsages []*ResourceUsage) *yamlv3.Node {
 }
 
 func loadReferenceUsageSchema() (map[string][]*schema.UsageSchemaItem, error) {
-	usageSchema := make(map[string][]*schema.UsageSchemaItem)
+	var usageSchema map[string][]*schema.UsageSchemaItem
 
 	usageFile, err := loadReferenceFile()
 	if err != nil {
 		return usageSchema, err
 	}
+
+	rawUsageSchema, err := loadUsageFileIntoUsageSchema(usageFile)
+	if err != nil {
+		return usageSchema, err
+	}
+
+	for k, usageSchemaItem := range rawUsageSchema {
+		resourceType := strings.Split(k, ".")[0]
+		usageSchema[resourceType] = usageSchemaItem
+	}
+
+	return usageSchema, nil
+}
+
+func loadUsageFileIntoUsageSchema(usageFile UsageFile) (map[string][]*schema.UsageSchemaItem, error) {
+	usageSchema := make(map[string][]*schema.UsageSchemaItem)
 
 	if len(usageFile.ResourceUsage.Content)%2 != 0 {
 		log.Errorf("YAML resource usage contents are not divisible by 2")
@@ -311,14 +332,14 @@ func loadReferenceUsageSchema() (map[string][]*schema.UsageSchemaItem, error) {
 	for i := 0; i < len(usageFile.ResourceUsage.Content); i += 2 {
 		resourceKeyNode := usageFile.ResourceUsage.Content[i]
 		resourceValNode := usageFile.ResourceUsage.Content[i+1]
+		key := resourceKeyNode.Value
 
 		if len(resourceValNode.Content)%2 != 0 {
 			log.Errorf("YAML resource value contents are not divisible by 2")
 			return usageSchema, errors.New("Error loading reference usage file: unexpected YAML format")
 		}
 
-		resourceType := strings.Split(resourceKeyNode.Value, ".")[0]
-		usageSchema[resourceType] = make([]*schema.UsageSchemaItem, 0, len(resourceValNode.Content)/2)
+		usageSchema[key] = make([]*schema.UsageSchemaItem, 0, len(resourceValNode.Content)/2)
 
 		for i := 0; i < len(resourceValNode.Content); i += 2 {
 			attrKeyNode := resourceValNode.Content[i]
@@ -329,7 +350,7 @@ func loadReferenceUsageSchema() (map[string][]*schema.UsageSchemaItem, error) {
 				return usageSchema, errors.Wrap(err, "Error loading reference usage file")
 			}
 
-			usageSchema[resourceType] = append(usageSchema[resourceType], schemaItem)
+			usageSchema[key] = append(usageSchema[key], schemaItem)
 		}
 	}
 
@@ -439,6 +460,7 @@ func toSchemaItem(keyNode *yamlv3.Node, valNode *yamlv3.Node) (*schema.UsageSche
 		Key:          keyNode.Value,
 		ValueType:    usageValueType,
 		DefaultValue: defaultValue,
+		Description:  valNode.LineComment,
 	}, nil
 }
 
@@ -451,8 +473,8 @@ func loadReferenceFile() (UsageFile, error) {
 	return parseYAML(*contents)
 }
 
-func LoadFromFile(usageFilePath string, createIfNotExisting bool) (map[string]*schema.UsageData, error) {
-	usageData := make(map[string]*schema.UsageData)
+func LoadFromFile(usageFilePath string, createIfNotExisting bool) (map[string][]*schema.UsageSchemaItem, error) {
+	usageData := make(map[string][]*schema.UsageSchemaItem)
 
 	if usageFilePath == "" {
 		return usageData, nil
@@ -483,23 +505,12 @@ func LoadFromFile(usageFilePath string, createIfNotExisting bool) (map[string]*s
 		return usageData, errors.Wrapf(err, "Error reading usage file")
 	}
 
-	y, err := parseYAML(out)
+	usageFile, err := parseYAML(out)
 	if err != nil {
 		return usageData, errors.Wrapf(err, "Error parsing usage file")
 	}
 
-	var m map[string]interface{}
-
-	if y.ResourceUsage.Kind != 0 {
-		err = y.ResourceUsage.Decode(&m)
-		if err != nil {
-			return usageData, errors.Wrap(err, "Error parsing usage YAML")
-		}
-	}
-
-	usageData = schema.NewUsageMap(m)
-
-	return usageData, nil
+	return loadUsageFileIntoUsageSchema(usageFile)
 }
 
 func parseYAML(y []byte) (UsageFile, error) {
