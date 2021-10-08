@@ -1,6 +1,7 @@
 package usage
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io/ioutil"
@@ -9,7 +10,6 @@ import (
 
 	"github.com/infracost/infracost"
 	"github.com/infracost/infracost/internal/schema"
-	"github.com/infracost/infracost/internal/ui"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/mod/semver"
@@ -46,7 +46,7 @@ func SyncUsageData(projects []*schema.Project, existingUsageData map[string]*sch
 		resources = append(resources, project.Resources...)
 	}
 
-	syncResult, syncedResourcesUsage, comment := syncResourcesUsage(resources, usageSchema, existingUsageData)
+	syncResult, syncedResourcesUsage, hasUsage := syncResourcesUsage(resources, usageSchema, existingUsageData)
 
 	docNode := &yamlv3.Node{
 		Kind: yamlv3.DocumentNode,
@@ -66,15 +66,21 @@ func SyncUsageData(projects []*schema.Project, existingUsageData map[string]*sch
 		Tag: "!!str",
 		Value: "0.1",
 	})
-	rootNode.Content = append(rootNode.Content, &yamlv3.Node{
+
+	resourceUsageKeyNode := &yamlv3.Node{
 		Kind: yamlv3.ScalarNode,
 		Tag: "!!str",
 		Value: "resource_usage",
-	})
+	}
+	if !hasUsage {
+		resourceUsageKeyNode.Value = fmt.Sprintf("00__%s", resourceUsageKeyNode.Value)
+	}
+
+	rootNode.Content = append(rootNode.Content, resourceUsageKeyNode)
 	rootNode.Content = append(rootNode.Content, syncedResourcesUsage)
 	
 	d, err := yamlv3.Marshal(docNode)
-	d = append(d, comment...)
+	d = bytes.ReplaceAll(d, []byte("00__"), []byte("# "))
 	
 	if err != nil {
 		return nil, err
@@ -86,7 +92,7 @@ func SyncUsageData(projects []*schema.Project, existingUsageData map[string]*sch
 	return &syncResult, nil
 }
 
-func syncResourcesUsage(resources []*schema.Resource, usageSchema map[string][]*schema.UsageSchemaItem, existingUsageData map[string]*schema.UsageData) (SyncResult, *yamlv3.Node, string) {
+func syncResourcesUsage(resources []*schema.Resource, usageSchema map[string][]*schema.UsageSchemaItem, existingUsageData map[string]*schema.UsageData) (SyncResult, *yamlv3.Node, bool) {
 	syncResult := SyncResult{EstimationErrors: make(map[string]error)}
 
 	for _, resource := range resources {
@@ -151,8 +157,8 @@ func syncResourcesUsage(resources []*schema.Resource, usageSchema map[string][]*
 		}
 	}
 
-	result, comment := dumpResourceYAML(resources)
-	return syncResult, result, comment
+	result, hasUsage := dumpResourceYAML(resources)
+	return syncResult, result, hasUsage
 }
 
 func findMatchingUsageFileSchema(usageSchema map[string][]*schema.UsageSchemaItem, resource *schema.Resource) ([]*schema.UsageSchemaItem, bool) {
@@ -168,13 +174,12 @@ func findMatchingUsageFileSchema(usageSchema map[string][]*schema.UsageSchemaIte
 	return matchingUsageFileSchema, ok
 }
 
-func dumpResourceYAML(resources []*schema.Resource) (*yamlv3.Node, string) {
+func dumpResourceYAML(resources []*schema.Resource) (*yamlv3.Node, bool) {
 	rootNode := &yamlv3.Node{
 		Kind: yamlv3.MappingNode,
 	}
-	rootCommentNode := &yamlv3.Node{
-		Kind: yamlv3.MappingNode,
-	}
+
+	hasUsage := false
 	
 	for _, resource := range resources {
 		resourceKeyNode := &yamlv3.Node{
@@ -187,9 +192,7 @@ func dumpResourceYAML(resources []*schema.Resource) (*yamlv3.Node, string) {
 			Kind: yamlv3.MappingNode,
 		}
 		
-		resourceCommentNode := &yamlv3.Node{
-			Kind: yamlv3.MappingNode,
-		}
+		resourceHasUsage := false
 		
 		for _, schemaItem := range resource.UsageSchema {
 			kind := yamlv3.ScalarNode
@@ -240,30 +243,25 @@ func dumpResourceYAML(resources []*schema.Resource) (*yamlv3.Node, string) {
 			}
 			
 			if schemaItem.Value == nil {
-				resourceCommentNode.Content = append(resourceCommentNode.Content, itemKeyNode)
-				resourceCommentNode.Content = append(resourceCommentNode.Content, itemValNode)
+				itemKeyNode.Value = fmt.Sprintf("00__%s", itemKeyNode.Value)
 			} else {
-				resourceValNode.Content = append(resourceValNode.Content, itemKeyNode)
-				resourceValNode.Content = append(resourceValNode.Content, itemValNode)
+				resourceHasUsage = true
+				hasUsage = true
 			}
+			
+			resourceValNode.Content = append(resourceValNode.Content, itemKeyNode)
+			resourceValNode.Content = append(resourceValNode.Content, itemValNode)
 		}
 			
-		if len(resourceValNode.Content) == 0 {
-			rootCommentNode.Content = append(rootCommentNode.Content, resourceKeyNode)
-			rootCommentNode.Content = append(rootCommentNode.Content, resourceCommentNode)
-		} else {
-			resourceComment, _ := yamlv3.Marshal(resourceCommentNode)
-			resourceValNode.Content[len(resourceValNode.Content)-1].FootComment = string(resourceComment)
-			
-			rootNode.Content = append(rootNode.Content, resourceKeyNode)
-			rootNode.Content = append(rootNode.Content, resourceValNode)
+		if !resourceHasUsage {
+			resourceKeyNode.Value = fmt.Sprintf("00__%s", resourceKeyNode.Value)
 		}
-	}
-	
-	rootComment, _ := yamlv3.Marshal(rootCommentNode)
-	comment := ui.Indent(commentize(string(rootComment)), "    ")
 
-	return rootNode, comment
+		rootNode.Content = append(rootNode.Content, resourceKeyNode)
+		rootNode.Content = append(rootNode.Content, resourceValNode)
+	}
+
+	return rootNode, hasUsage
 }
 
 func commentize(s string) string {
