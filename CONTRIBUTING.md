@@ -389,8 +389,8 @@ To do this Infracost supports passing usage data in through a usage YAML file. W
 The resource cost calcuation file (`internal/resources/*`) should describe the usage as `UsageSchemaItems` and container a helper to populate the resource arguments from usage data:
 ```go
 var LambdaFunctionUsageSchema = []*schema.UsageSchemaItem{
-	{Key: "request_duration_ms", DefaultValue: 0, ValueType: schema.Float64},
-	{Key: "monthly_requests", DefaultValue: 0, ValueType: schema.Float64},
+	{Key: "request_duration_ms", DefaultValue: 0.0, ValueType: schema.Float64},
+	{Key: "monthly_requests", DefaultValue: 0.0, ValueType: schema.Float64},
 }
 
 func (args *LambdaFunctionArguments) PopulateUsage(u *schema.UsageData) {

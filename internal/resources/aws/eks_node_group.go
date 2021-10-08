@@ -56,7 +56,7 @@ func (a *EKSNodeGroup) getUsageSchemaWithDefaultInstanceCount() []*schema.UsageS
 	usageSchema := make([]*schema.UsageSchemaItem, 0, len(EKSNodeGroupUsageSchema))
 	for _, u := range EKSNodeGroupUsageSchema {
 		if u.Key == "instances" {
-			usageSchema = append(usageSchema, &schema.UsageSchemaItem{Key: "instances", DefaultValue: a.InstanceCount, ValueType: schema.Int64})
+			usageSchema = append(usageSchema, &schema.UsageSchemaItem{Key: "instances", DefaultValue: intVal(a.InstanceCount), ValueType: schema.Int64})
 		} else {
 			usageSchema = append(usageSchema, u)
 		}

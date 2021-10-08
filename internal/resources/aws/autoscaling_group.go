@@ -53,7 +53,7 @@ func (a *AutoscalingGroup) getUsageSchemaWithDefaultInstanceCount() []*schema.Us
 	usageSchema := make([]*schema.UsageSchemaItem, 0, len(AutoscalingGroupUsageSchema))
 	for _, u := range AutoscalingGroupUsageSchema {
 		if u.Key == "instances" {
-			usageSchema = append(usageSchema, &schema.UsageSchemaItem{Key: "instances", DefaultValue: instanceCount, ValueType: schema.Int64})
+			usageSchema = append(usageSchema, &schema.UsageSchemaItem{Key: "instances", DefaultValue: intVal(instanceCount), ValueType: schema.Int64})
 		} else {
 			usageSchema = append(usageSchema, u)
 		}

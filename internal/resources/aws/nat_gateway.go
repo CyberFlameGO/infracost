@@ -14,7 +14,7 @@ type NATGateway struct {
 }
 
 var NATGatewayUsageSchema = []*schema.UsageSchemaItem{
-	{Key: "monthly_data_processed_gb", DefaultValue: 0, ValueType: schema.Float64},
+	{Key: "monthly_data_processed_gb", DefaultValue: 0.0, ValueType: schema.Float64},
 }
 
 func (a *NATGateway) PopulateUsage(u *schema.UsageData) {
